@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using DG.Tweening;
@@ -14,6 +14,12 @@ public class NotificationManager : MonoBehaviour
     [SerializeField] private GameObject notificationPrefab;
     [SerializeField] public GameObject gorevHatirlatmaPrefab;
 
+    [Header("Ekran Dışı (Off-Screen) Ayarları")]
+    [Tooltip("Bildirimlerin ekran dışında saklanacağı güvenli mesafeler (Çözünürlüğe göre artırın)")]
+    [SerializeField] private float offScreenLeftX = -2000f;
+    [SerializeField] private float offScreenRightX = 2000f;
+    [SerializeField] private float offScreenBottomY = -800f;
+
     [Header("Sol Taraf (Görev) Ayarları")]
     [SerializeField] private float taskVisibleXPosition = -920f;
     [SerializeField] private float startYOffset = 400f;
@@ -24,9 +30,7 @@ public class NotificationManager : MonoBehaviour
     [SerializeField] private float hintTargetY = -270f;
 
     [Header("Sağ Taraf (Pil vb.) Ayarları")]
-    [Tooltip("Ekranın sağında duracağı X konumu (Pozitif olmalı, örn: 800-900)")]
     [SerializeField] private float batteryTargetX = 920f;
-    [Tooltip("Ekranın sağında duracağı Y konumu")]
     [SerializeField] private float batteryTargetY = -270f;
 
     [Header("Genel Ayarlar")]
@@ -74,7 +78,7 @@ public class NotificationManager : MonoBehaviour
         }
         ResetManager();
 
-        GameObject canvasObj = GameObject.Find("UI_NotificationCanvas");
+        GameObject canvasObj = GameObject.Find(notificationCanvasName);
         if (canvasObj != null) notificationCanvas = canvasObj.GetComponent<Canvas>();
     }
 
@@ -105,14 +109,13 @@ public class NotificationManager : MonoBehaviour
 
     public void CloseTaskNotification(string taskId)
     {
-        if (activeTaskNotifications.ContainsKey(taskId))
+        if (activeTaskNotifications.TryGetValue(taskId, out GameObject notif))
         {
-            var notif = activeTaskNotifications[taskId];
             activeTaskNotifications.Remove(taskId);
 
             if (notif != null)
             {
-                notif.transform.DOLocalMoveX(-1500, 0.5f).SetEase(Ease.InQuad).OnComplete(() => {
+                notif.transform.DOLocalMoveX(offScreenLeftX, 0.5f).SetEase(Ease.InQuad).OnComplete(() => {
                     Destroy(notif);
                     RealignNotifications();
                 });
@@ -122,9 +125,8 @@ public class NotificationManager : MonoBehaviour
 
     public bool UpdateTaskNotificationVisuals(string originalMessage, string newText)
     {
-        if (activeTaskNotifications.ContainsKey(originalMessage))
+        if (activeTaskNotifications.TryGetValue(originalMessage, out GameObject notif))
         {
-            GameObject notif = activeTaskNotifications[originalMessage];
             if (notif != null)
             {
                 var textComp = notif.GetComponentInChildren<TextMeshProUGUI>();
@@ -169,6 +171,20 @@ public class NotificationManager : MonoBehaviour
         return currentY;
     }
 
+    // --- KOD TEKRARINI ÖNLEYEN YARDIMCI METOT ---
+    private IEnumerator WaitForKeyOrTime(KeyCode key, float defaultTime)
+    {
+        if (key != KeyCode.None)
+        {
+            yield return new WaitUntil(() => Input.GetKeyDown(key));
+        }
+        else
+        {
+            yield return new WaitForSeconds(defaultTime);
+        }
+    }
+
+    // --- KUYRUK İŞLEYİCİ ---
     private IEnumerator ProcessQueue()
     {
         while (notificationQueue.Count > 0)
@@ -182,121 +198,95 @@ public class NotificationManager : MonoBehaviour
             if (prefab == null) { isShowing = false; yield break; }
 
             GameObject notif = Instantiate(prefab, notificationCanvas.transform);
-            Image panel = notif.GetComponent<Image>();
             TextMeshProUGUI text = notif.GetComponentInChildren<TextMeshProUGUI>();
             if (text != null) text.text = data.message;
 
             LayoutRebuilder.ForceRebuildLayoutImmediate(notif.GetComponent<RectTransform>());
 
-            // --- TİP KONTROLLERİ ---
-
-            // 1. UYARI (WARNING) - ORTA ALT
-            if (data.type == NotificationType.Warning)
+            // DURUMLARA GÖRE ALT METOTLARA YÖNLENDİR
+            switch (data.type)
             {
-                RectTransform rect = notif.GetComponent<RectTransform>();
-                rect.pivot = new Vector2(0.5f, 0.5f);
-                notif.transform.localPosition = new Vector3(0, -600, 0);
+                case NotificationType.Warning:
+                case NotificationType.Uyari:
+                case NotificationType.Bilgilendirme:
+                    yield return StartCoroutine(HandleBottomNotification(notif, text, data));
+                    break;
 
-                if (text != null) text.color = Color.red;
+                case NotificationType.GorevHatirlatma:
+                    HandleTaskNotification(notif, data);
+                    break;
 
-                notif.transform.DOLocalMoveY(-350f, 0.5f).SetEase(Ease.OutBack);
+                case NotificationType.PilBildirimi:
+                    yield return StartCoroutine(HandleSideNotification(notif, data, true)); // true = Sağ taraf
+                    break;
 
-                if (data.closeKey != KeyCode.None)
-                {
-                    while (!Input.GetKeyDown(data.closeKey)) { yield return null; }
-                }
-                else
-                {
-                    yield return new WaitForSeconds(4f);
-                }
-
-                if (notif != null) notif.transform.DOLocalMoveY(-700f, 0.5f).SetEase(Ease.InBack).OnComplete(() => Destroy(notif));
+                case NotificationType.Ipucu:
+                default:
+                    yield return StartCoroutine(HandleSideNotification(notif, data, false)); // false = Sol taraf
+                    break;
             }
 
-            // 2. GÖREV (QUEST) - SOL LİSTE
-            else if (data.type == NotificationType.GorevHatirlatma)
-            {
-                if (activeTaskNotifications.ContainsKey(data.message))
-                {
-                    Destroy(activeTaskNotifications[data.message]);
-                    activeTaskNotifications.Remove(data.message);
-                }
-                float targetY = CalculateNextYPosition();
-                notif.transform.localPosition = new Vector3(-1500, targetY, 0);
-                activeTaskNotifications[data.message] = notif;
-                notif.transform.DOLocalMoveX(taskVisibleXPosition, 0.5f).SetEase(Ease.OutQuad);
-            }
-
-            // 3. BİLGİLENDİRME (TUTORIAL)
-            else if (data.type == NotificationType.Bilgilendirme)
-            {
-                RectTransform rect = notif.GetComponent<RectTransform>();
-                rect.pivot = new Vector2(0.5f, 0.5f);
-                notif.transform.localPosition = new Vector3(0, -600, 0);
-                if (text != null) text.color = Color.white;
-                notif.transform.DOLocalMoveY(-350f, 0.5f).SetEase(Ease.OutBack);
-
-                if (data.closeKey != KeyCode.None)
-                {
-                    while (!Input.GetKeyDown(data.closeKey)) { yield return null; }
-                }
-                else
-                {
-                    yield return new WaitForSeconds(4f);
-                }
-
-                if (notif != null) notif.transform.DOLocalMoveY(-700f, 0.5f).SetEase(Ease.InBack).OnComplete(() => Destroy(notif));
-            }
-
-            // 4. PİL BİLDİRİMİ (SAĞ TARAFTAN ÇIKAN) --- YENİ ---
-            else if (data.type == NotificationType.PilBildirimi)
-            {
-                // Pivot'u Sağ-Üst (1, 1) yapıyoruz ki yazı uzadıkça sola doğru büyüsün, ekran dışına taşmasın.
-                RectTransform rect = notif.GetComponent<RectTransform>();
-                rect.pivot = new Vector2(1f, 1f);
-
-                // Başlangıç: Ekranın SAĞ dışında (1600)
-                notif.transform.localPosition = new Vector3(1600, batteryTargetY, 0);
-
-                // Harekete geç: Ekranın SAĞ tarafındaki hedefe (batteryTargetX, örn: 900)
-                notif.transform.DOLocalMoveX(batteryTargetX, 0.5f).SetEase(Ease.OutQuad);
-
-                if (data.closeKey != KeyCode.None)
-                {
-                    while (!Input.GetKeyDown(data.closeKey)) { yield return null; }
-                }
-                else
-                {
-                    yield return new WaitForSeconds(3f);
-                }
-
-                // Geri dön: Tekrar sağa (1600)
-                if (notif != null) notif.transform.DOLocalMoveX(1600, 0.5f).SetEase(Ease.InQuad).OnComplete(() => Destroy(notif));
-            }
-
-            // 5. NORMAL İPUCU (SOL TARAFTAN ÇIKAN)
-            else
-            {
-                notif.transform.localPosition = new Vector3(-1600, hintTargetY, 0);
-                notif.transform.DOLocalMoveX(hintTargetX, 0.5f).SetEase(Ease.OutQuad);
-
-                if (data.closeKey != KeyCode.None)
-                {
-                    while (!Input.GetKeyDown(data.closeKey)) { yield return null; }
-                }
-                else
-                {
-                    yield return new WaitForSeconds(3f);
-                }
-
-                if (notif != null) notif.transform.DOLocalMoveX(-1600, 0.5f).SetEase(Ease.InQuad).OnComplete(() => Destroy(notif));
-            }
-
-            if (data.type != NotificationType.GorevHatirlatma) yield return new WaitForSeconds(0.5f);
+            // Görev bildirimi değilse kuyruktaki diğer öğeye geçmeden önce yarım saniye es ver
+            if (data.type != NotificationType.GorevHatirlatma) 
+                yield return new WaitForSeconds(0.5f);
 
             isShowing = false;
         }
     }
+
+    #region Bildirim Animasyon Mantıkları
+
+    private IEnumerator HandleBottomNotification(GameObject notif, TextMeshProUGUI text, NotificationData data)
+    {
+        RectTransform rect = notif.GetComponent<RectTransform>();
+        rect.pivot = new Vector2(0.5f, 0.5f);
+        notif.transform.localPosition = new Vector3(0, offScreenBottomY, 0);
+
+        if (text != null) 
+            text.color = (data.type == NotificationType.Warning || data.type == NotificationType.Uyari) ? Color.red : Color.white;
+
+        notif.transform.DOLocalMoveY(-350f, 0.5f).SetEase(Ease.OutBack);
+
+        yield return StartCoroutine(WaitForKeyOrTime(data.closeKey, 4f));
+
+        if (notif != null) 
+            notif.transform.DOLocalMoveY(offScreenBottomY, 0.5f).SetEase(Ease.InBack).OnComplete(() => Destroy(notif));
+    }
+
+    private void HandleTaskNotification(GameObject notif, NotificationData data)
+    {
+        if (activeTaskNotifications.ContainsKey(data.message))
+        {
+            Destroy(activeTaskNotifications[data.message]);
+            activeTaskNotifications.Remove(data.message);
+        }
+        
+        float targetY = CalculateNextYPosition();
+        notif.transform.localPosition = new Vector3(offScreenLeftX, targetY, 0);
+        activeTaskNotifications[data.message] = notif;
+        notif.transform.DOLocalMoveX(taskVisibleXPosition, 0.5f).SetEase(Ease.OutQuad);
+    }
+
+    private IEnumerator HandleSideNotification(GameObject notif, NotificationData data, bool isRightSide)
+    {
+        RectTransform rect = notif.GetComponent<RectTransform>();
+        
+        float startX = isRightSide ? offScreenRightX : offScreenLeftX;
+        float targetX = isRightSide ? batteryTargetX : hintTargetX;
+        float targetY = isRightSide ? batteryTargetY : hintTargetY;
+
+        rect.pivot = isRightSide ? new Vector2(1f, 1f) : new Vector2(0f, 1f);
+        notif.transform.localPosition = new Vector3(startX, targetY, 0);
+
+        notif.transform.DOLocalMoveX(targetX, 0.5f).SetEase(Ease.OutQuad);
+
+        yield return StartCoroutine(WaitForKeyOrTime(data.closeKey, 3f));
+
+        if (notif != null) 
+            notif.transform.DOLocalMoveX(startX, 0.5f).SetEase(Ease.InQuad).OnComplete(() => Destroy(notif));
+    }
+
+    #endregion
 }
 
 public struct NotificationData
@@ -311,4 +301,14 @@ public struct NotificationData
         this.message = message;
         this.closeKey = closeKey;
     }
+}
+
+public enum NotificationType
+{
+    Ipucu,
+    GorevHatirlatma,
+    Uyari,
+    Warning, // Not: "Uyari" ile tamamen aynı işlevi görüyor, projede birini silmek isteyebilirsin.
+    Bilgilendirme,
+    PilBildirimi
 }
